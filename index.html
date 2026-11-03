@@ -133,6 +133,7 @@ section { padding: 44px 0; }
   box-shadow: 0 24px 50px -28px var(--rose);
   touch-action: manipulation;
 }
+.board.dragging { overflow: visible; }
 .tile {
   position: absolute;
   left: 0;
@@ -141,16 +142,25 @@ section { padding: 44px 0; }
   height: calc(100% / 3);
   padding: 0;
   border: 0;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
   background-color: var(--rose-soft);
   background-image: var(--img);
   background-size: 300% 300%;
   box-shadow: inset 0 0 0 1.5px var(--card);
-  transition: transform 0.24s ease;
+  transition: transform 0.24s ease, box-shadow 0.2s ease;
 }
-.tile.empty { visibility: hidden; }
+.tile.lifting {
+  z-index: 5;
+  cursor: grabbing;
+  transition: none;
+  box-shadow: 0 22px 34px -8px rgba(60, 20, 40, 0.6), inset 0 0 0 2px var(--card);
+}
+.tile.target { box-shadow: inset 0 0 0 4px var(--rose); }
+.tile.selected { box-shadow: inset 0 0 0 4px var(--lav); }
 .board.solved .tile { box-shadow: none; cursor: default; }
-.board.solved .tile.empty { visibility: visible; }
 .puzzle-bar { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 18px; }
 .status { color: var(--muted); font-size: 15px; min-width: 90px; font-variant-numeric: tabular-nums; }
 .puzzle-note { margin-top: 14px; font-family: var(--font-display); font-style: italic; font-size: 19px; min-height: 1.6em; }
@@ -292,11 +302,11 @@ footer { text-align: center; color: var(--muted); font-size: 13px; padding-top: 
       </svg>
       <p class="eyebrow">For Amanda, my queen</p>
       <h1>A little puzzle first</h1>
-      <p class="lede">Tap a piece next to the empty space to slide it. Put the picture back together to open what I made for you.</p>
+      <p class="lede">Pick up a piece and drop it on another to swap them. Put the picture back together to open what I made for you.</p>
     </header>
 
     <div class="puzzle-wrap">
-      <div class="board" id="board" aria-label="Sliding puzzle"></div>
+      <div class="board" id="board" aria-label="Picture puzzle"></div>
       <div class="puzzle-bar">
         <span class="status" id="pStatus" aria-live="polite">Moves: 0</span>
         <button class="textbtn" id="shuffleBtn" type="button">Shuffle again</button>
@@ -434,85 +444,146 @@ footer { text-align: center; color: var(--muted); font-size: 13px; padding-top: 
     if (n === 3) { startCake(); if (!reduce) spawnPetals(); }
   }
 
-  /* ================= Stage 1: sliding puzzle ================= */
-  var N = 3, TOTAL = 9, EMPTY = 8;
+  /* ================= Stage 1: drag-and-drop puzzle ================= */
+  var N = 3, TOTAL = 9;
   var board = document.getElementById('board');
   var pStatus = document.getElementById('pStatus');
   var pNote = document.getElementById('pNote');
   var skipBtn = document.getElementById('skipBtn');
-  var order = [], tiles = [], moves = 0, solved = false;
+  var order = [], tiles = [], moves = 0, solved = false, selected = -1, drag = null, targetPos = -1;
 
   board.style.setProperty('--img', 'url("' + document.getElementById('puzzleSrc').getAttribute('src') + '")');
 
-  function neighbors(pos) {
-    var x = pos % N, y = Math.floor(pos / N), out = [];
-    if (x > 0) out.push(pos - 1);
-    if (x < N - 1) out.push(pos + 1);
-    if (y > 0) out.push(pos - N);
-    if (y < N - 1) out.push(pos + N);
-    return out;
+  function baseTransform(pos) {
+    return 'translate(' + ((pos % N) * 100) + '%,' + (Math.floor(pos / N) * 100) + '%)';
+  }
+  function place() {
+    for (var pos = 0; pos < TOTAL; pos++) tiles[order[pos]].style.transform = baseTransform(pos);
   }
   function isSolved() {
     for (var i = 0; i < TOTAL; i++) if (order[i] !== i) return false;
     return true;
   }
-  function place() {
-    for (var pos = 0; pos < TOTAL; pos++) {
-      var id = order[pos], x = pos % N, y = Math.floor(pos / N);
-      tiles[id].style.transform = 'translate(' + (x * 100) + '%,' + (y * 100) + '%)';
+  function shuffle() {
+    var fixed;
+    do {
+      order = [];
+      for (var i = 0; i < TOTAL; i++) order.push(i);
+      for (var k = TOTAL - 1; k > 0; k--) {
+        var j = Math.floor(Math.random() * (k + 1)), t = order[k];
+        order[k] = order[j];
+        order[j] = t;
+      }
+      fixed = 0;
+      for (var m = 0; m < TOTAL; m++) if (order[m] === m) fixed++;
+    } while (fixed > 1);
+  }
+  function slotAt(cx, cy) {
+    var r = board.getBoundingClientRect();
+    var left = r.left + board.clientLeft, top = r.top + board.clientTop;
+    var w = board.clientWidth, h = board.clientHeight;
+    var col = Math.floor((cx - left) / (w / N)), row = Math.floor((cy - top) / (h / N));
+    if (col < 0 || col >= N || row < 0 || row >= N) return -1;
+    return row * N + col;
+  }
+  function setTarget(pos) {
+    if (pos === targetPos) return;
+    if (targetPos >= 0) tiles[order[targetPos]].classList.remove('target');
+    targetPos = pos;
+    if (targetPos >= 0) tiles[order[targetPos]].classList.add('target');
+  }
+  function clearSelected() {
+    if (selected >= 0) tiles[selected].classList.remove('selected');
+    selected = -1;
+  }
+  function doSwap(a, b) {
+    var t = order[a];
+    order[a] = order[b];
+    order[b] = t;
+    moves++;
+    pStatus.textContent = 'Moves: ' + moves;
+    place();
+    if (moves >= 25) skipBtn.hidden = false;
+    if (isSolved()) finishPuzzle();
+  }
+  function tapSelect(id) {
+    if (solved) return;
+    if (selected === -1) {
+      selected = id;
+      tiles[id].classList.add('selected');
+    } else if (selected === id) {
+      clearSelected();
+    } else {
+      var a = order.indexOf(selected), b = order.indexOf(id);
+      clearSelected();
+      doSwap(a, b);
     }
+  }
+  function onDown(e, id) {
+    if (solved || drag) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    drag = { id: id, pos: order.indexOf(id), sx: e.clientX, sy: e.clientY, moved: false, pid: e.pointerId };
+    try { tiles[id].setPointerCapture(e.pointerId); } catch (err) {}
+  }
+  function onMove(e) {
+    if (!drag || e.pointerId !== drag.pid) return;
+    var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    if (!drag.moved) {
+      if (Math.sqrt(dx * dx + dy * dy) < 6) return;
+      drag.moved = true;
+      clearSelected();
+      tiles[drag.id].classList.add('lifting');
+      board.classList.add('dragging');
+    }
+    tiles[drag.id].style.transform = baseTransform(drag.pos) + ' translate(' + dx + 'px,' + dy + 'px) scale(1.07)';
+    var tp = slotAt(e.clientX, e.clientY);
+    setTarget(tp === drag.pos ? -1 : tp);
+  }
+  function onUp(e, cancelled) {
+    if (!drag || e.pointerId !== drag.pid) return;
+    var d = drag, t = tiles[d.id];
+    drag = null;
+    setTarget(-1);
+    t.classList.remove('lifting');
+    board.classList.remove('dragging');
+    try { t.releasePointerCapture(e.pointerId); } catch (err) {}
+    if (!d.moved) { if (!cancelled) tapSelect(d.id); return; }
+    var tp = cancelled ? -1 : slotAt(e.clientX, e.clientY);
+    if (tp >= 0 && tp !== d.pos) doSwap(d.pos, tp); else place();
   }
   function buildBoard() {
     board.innerHTML = '';
+    tiles = [];
     for (var id = 0; id < TOTAL; id++) {
       var b = document.createElement('button');
       b.type = 'button';
-      b.className = 'tile' + (id === EMPTY ? ' empty' : '');
+      b.className = 'tile';
       b.style.backgroundPosition = ((id % N) * 50) + '% ' + (Math.floor(id / N) * 50) + '%';
-      b.setAttribute('aria-label', id === EMPTY ? 'Empty space' : 'Puzzle piece');
-      if (id === EMPTY) b.tabIndex = -1;
-      (function (tid) { b.addEventListener('click', function () { tap(tid); }); })(id);
+      b.setAttribute('aria-label', 'Puzzle piece');
+      (function (tid) {
+        b.addEventListener('pointerdown', function (e) { onDown(e, tid); });
+        b.addEventListener('pointermove', onMove);
+        b.addEventListener('pointerup', function (e) { onUp(e, false); });
+        b.addEventListener('pointercancel', function (e) { onUp(e, true); });
+        b.addEventListener('click', function (e) { if (e.detail === 0) tapSelect(tid); });
+      })(id);
       board.appendChild(b);
       tiles[id] = b;
     }
   }
-  function shuffle() {
-    do {
-      order = [];
-      for (var i = 0; i < TOTAL; i++) order.push(i);
-      var e = EMPTY, prev = -1;
-      for (var k = 0; k < 90; k++) {
-        var opts = neighbors(e).filter(function (n) { return n !== prev; });
-        var pick = opts[Math.floor(Math.random() * opts.length)];
-        order[e] = order[pick];
-        order[pick] = EMPTY;
-        prev = e;
-        e = pick;
-      }
-    } while (isSolved());
-  }
   function newGame() {
     solved = false;
     moves = 0;
-    board.classList.remove('solved');
+    selected = -1;
+    targetPos = -1;
+    drag = null;
+    board.classList.remove('solved', 'dragging');
     pStatus.textContent = 'Moves: 0';
     pNote.textContent = '';
     skipBtn.hidden = true;
     buildBoard();
     shuffle();
     place();
-  }
-  function tap(id) {
-    if (solved || id === EMPTY) return;
-    var pos = order.indexOf(id), ep = order.indexOf(EMPTY);
-    if (neighbors(ep).indexOf(pos) === -1) return;
-    order[ep] = id;
-    order[pos] = EMPTY;
-    moves++;
-    pStatus.textContent = 'Moves: ' + moves;
-    place();
-    if (moves >= 45) skipBtn.hidden = false;
-    if (isSolved()) finishPuzzle();
   }
   function finishPuzzle() {
     solved = true;
